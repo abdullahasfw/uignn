@@ -1,6 +1,7 @@
 import streamlit as st
 import torch
 import pickle
+import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
@@ -12,8 +13,8 @@ from fraud_detection.models import GAT, GCN, GIN
 
 st.set_page_config(page_title="Bitcoin Fraud Detection", page_icon="🕵️", layout="wide")
 
-st.title("🕵️ Bitcoin Fraud Detection (Lite Version)")
-st.markdown("Menggunakan **Graph Neural Networks (GNN)** untuk mendeteksi transaksi ilegal.")
+st.title("🕵️ Bitcoin Fraud Detection System")
+st.markdown("Menggunakan **Graph Neural Networks (GNN)**. Pilih nomor urut node untuk mendeteksi apakah transaksi tersebut Fraud (Illicit) atau Aman (Licit).")
 
 # ==========================================
 # 1. SETUP MODEL
@@ -39,8 +40,7 @@ def load_model(model_name):
 
         conf = OmegaConf.load(config_path)
         
-        # --- PERBAIKAN DI SINI ---
-        # Ubah input_dim jadi 165 agar sesuai dengan weights (checkpoint)
+        # Paksa input dim ke 165 sesuai weights yang Anda miliki
         conf.model.input_dim = 165 
         
         model = ModelClass(conf.model).double()
@@ -52,8 +52,7 @@ def load_model(model_name):
         return model
     except RuntimeError as e:
         if "size mismatch" in str(e):
-            st.error(f"⚠️ **Size Mismatch Error:** {e}")
-            st.info("Sistem mencoba menyesuaikan dimensi input, tapi struktur weights berbeda.")
+            st.error(f"⚠️ **Size Mismatch:** {e}")
         else:
             st.error(f"Runtime Error: {e}")
         return None
@@ -79,99 +78,53 @@ def load_lite_data():
 data_lite = load_lite_data()
 
 # ==========================================
-# 3. INTERFACE
+# 3. INTERFACE PENGGUNA (MODIFIED)
 # ==========================================
 if data_lite and model:
+    
+    # --- MEMBUAT LIST URUTAN NODE ---
+    # Mengambil semua key (TxID) dan mengubahnya menjadi list agar bisa diakses via index
+    all_tx_ids = list(data_lite['features'].keys())
+    total_nodes = len(all_tx_ids)
+    
     st.divider()
-    col1, col2 = st.columns([1, 2])
+    
+    # Layout Kolom
+    col_input, col_result = st.columns([1, 2])
 
-    with col1:
-        st.subheader("🔍 Cek Transaksi")
-        # Ambil contoh ID yang valid
-        if 'illicit_examples' in data_lite and len(data_lite['illicit_examples']) > 0:
-            example_id = data_lite['illicit_examples'][0]
-        else:
-            # Fallback jika list kosong, ambil key pertama dari features
-            example_id = list(data_lite['features'].keys())[0]
+    with col_input:
+        st.subheader("🔢 Pilih Node")
+        st.info(f"Total Transaksi tersedia: **{total_nodes}**")
+        
+        # INPUT BERDASARKAN NOMOR URUT (1 - Total)
+        node_index = st.number_input(
+            "Masukkan Nomor Urut Node:", 
+            min_value=1, 
+            max_value=total_nodes, 
+            value=1,
+            step=1
+        )
+        
+        # Konversi Nomor Urut -> Transaction ID Asli
+        # Dikurangi 1 karena list python mulai dari 0
+        selected_tx_id = all_tx_ids[node_index - 1]
+        
+        st.caption(f"🆔 Original ID: `{selected_tx_id}`")
+        
+        analyze_btn = st.button("🔍 Analisa Node Ini", type="primary")
+        
+        # Optional: Tampilkan info status asli (jika ada di data untuk validasi)
+        # Cek apakah ID ini termasuk illicit di data sample
+        is_known_illicit = "Unknown"
+        if 'illicit_examples' in data_lite:
+            if selected_tx_id in data_lite['illicit_examples']:
+                st.warning("Info Data Asli: Labelled Illicit")
+            else:
+                st.success("Info Data Asli: Labelled Licit/Unknown")
 
-        st.info(f"Contoh ID Transaksi: `{example_id}`")
-        tx_id_input = st.text_input("Transaction ID:", value=str(example_id))
-        analyze_btn = st.button("Analisa", type="primary")
-
-    with col2:
+    with col_result:
         if analyze_btn:
+            tx_id = selected_tx_id # Gunakan ID hasil mapping
+            
             try:
-                tx_id = int(tx_id_input)
-                if tx_id in data_lite['features']:
-                    
-                    # --- PERSIAPAN DATA ---
-                    neighbor_ids = data_lite['adj'].get(tx_id, [])
-                    valid_neighbors = [n for n in neighbor_ids if n in data_lite['features']]
-                    all_nodes = [tx_id] + valid_neighbors
-                    
-                    node_map = {orig: i for i, orig in enumerate(all_nodes)}
-                    
-                    # Ambil features raw
-                    x_list = [data_lite['features'][nid] for nid in all_nodes]
-                    x = torch.tensor(x_list, dtype=torch.double)
-                    
-                    # --- PERBAIKAN DIMENSI FITUR ---
-                    # Jika data punya 166 fitur tapi model minta 165, kita potong 1 terakhir (atau pertama)
-                    # Biasanya time-step dibuang. Kita coba ambil 165 fitur pertama.
-                    if x.shape[1] == 166:
-                        x = x[:, :165] 
-                    
-                    # Buat Edge Index
-                    edge_src, edge_dst = [], []
-                    target_idx = 0 
-                    
-                    for neighbor in valid_neighbors:
-                        n_idx = node_map[neighbor]
-                        edge_src.extend([target_idx, n_idx])
-                        edge_dst.extend([n_idx, target_idx])
-                    
-                    # Self loops
-                    for i in range(len(all_nodes)):
-                        edge_src.append(i)
-                        edge_dst.append(i)
-                        
-                    edge_index = torch.tensor([edge_src, edge_dst], dtype=torch.long)
-                    mini_data = Data(x=x, edge_index=edge_index)
-
-                    # --- PREDIKSI ---
-                    with torch.no_grad():
-                        out = model(mini_data)
-                        target_out = out[0]
-                        
-                        if out.shape[-1] == 1:
-                            prob = torch.sigmoid(target_out).item()
-                        else:
-                            prob = torch.softmax(target_out, dim=0)[1].item()
-                    
-                    # Tampilkan Hasil
-                    st.subheader("Hasil Analisis")
-                    res_col1, res_col2 = st.columns(2)
-                    res_col1.metric("Risk Score", f"{prob:.2%}")
-                    
-                    if prob > 0.5:
-                        res_col2.error("🚨 ILLICIT (Fraud)")
-                    else:
-                        res_col2.success("✅ LICIT (Aman)")
-                        
-                    # Visualisasi Simple
-                    st.caption(f"Visualisasi Graph (Target + {len(valid_neighbors)} Neighbors)")
-                    G = nx.Graph()
-                    G.add_node(tx_id, color='red' if prob > 0.5 else 'green')
-                    for n in valid_neighbors:
-                        G.add_node(n, color='gray')
-                        G.add_edge(tx_id, n)
-                    
-                    fig, ax = plt.subplots(figsize=(6, 4))
-                    colors = [nx.get_node_attributes(G, 'color')[n] for n in G.nodes()]
-                    nx.draw(G, ax=ax, node_color=colors, with_labels=False, node_size=100)
-                    st.pyplot(fig)
-
-                else:
-                    st.error("ID tidak ditemukan di database sampel.")
-            except Exception as e:
-                st.error(f"Error: {e}")
+                # --- PER
