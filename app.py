@@ -9,7 +9,12 @@ from omegaconf import OmegaConf
 import torch_geometric
 from torch_geometric.utils import to_networkx
 
-# Import modules dari project kamu
+import sys
+# Tambahkan direktori kerja saat ini ke dalam path Python
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# ... baru kemudian import yang lain
+from fraud_detection.datasets import EllipticDataset
 from fraud_detection.datasets import EllipticDataset
 from fraud_detection.models import GAT, GCN, GIN
 
@@ -180,3 +185,4 @@ if graph is not None:
                         st.warning("ID tidak ditemukan.")
                 except Exception as e:
                     st.error(f"Error: {e}")
+
