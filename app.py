@@ -1,8 +1,9 @@
 import sys
 import os
 
-# FIX: Tambahkan path agar folder 'fraud_detection' dikenali sebagai modul oleh Streamlit
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# --- FIX: Tambahkan root direktori ke sys.path agar modul 'fraud_detection' terbaca ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(current_dir)
 
 import streamlit as st
 import gdown
@@ -10,173 +11,120 @@ import torch
 import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
+import glob
 from omegaconf import OmegaConf
 import torch_geometric
 from torch_geometric.utils import to_networkx
 
-# Import modul lokal
-from fraud_detection.datasets import EllipticDataset
-from fraud_detection.models import GAT, GCN, GIN
+# Import lokal (Pastikan folder fraud_detection memiliki file __init__.py)
+try:
+    from fraud_detection.datasets import EllipticDataset
+    from fraud_detection.models import GAT, GCN, GIN
+except ImportError as e:
+    st.error(f"Gagal mengimport modul: {e}")
+    st.info("Pastikan folder 'fraud_detection' memiliki file '__init__.py' kosong.")
 
 # ==========================================
 # KONFIGURASI HALAMAN
 # ==========================================
-st.set_page_config(
-    page_title="Bitcoin Fraud Detection GNN",
-    page_icon="🔍",
-    layout="wide"
-)
-
+st.set_page_config(page_title="Bitcoin Fraud GNN", page_icon="🔍", layout="wide")
 st.title("🕵️ Bitcoin Fraud Detection System")
-st.markdown("Sistem deteksi pencucian uang Bitcoin berbasis **Graph Neural Networks**.")
 
 # ==========================================
-# FUNGSI DOWNLOAD OTOMATIS (DATASET & RUNS)
+# FUNGSI DOWNLOAD (DATASET & MODEL)
 # ==========================================
-
-def download_from_drive():
-    """Mengunduh semua file yang diperlukan untuk deployment"""
-    # 1. Dataset Files
+def download_assets():
+    """Mengunduh Dataset dan Hasil Training dari Drive"""
+    # 1. Dataset
     data_dir = "data/elliptic_bitcoin_dataset"
     os.makedirs(data_dir, exist_ok=True)
-    
     dataset_files = {
         "elliptic_txs_features.csv": "1PcpbycYW06JdIm2vfrYjHuVPR1ApNOgJ",
         "elliptic_txs_edgelist.csv": "1bARgKjr3BWVCigrIhrQ1SdgSrJ4JABBq",
         "elliptic_txs_classes.csv": "1V7pbbbo34hidCgn7xwDegqOp1qVST0tB"
     }
-    
-    # 2. Training Runs (Weights & Logs)
-    runs_base = "runs"
-    os.makedirs(runs_base, exist_ok=True)
-    
-    training_folders = {
-        "Dec01_11-14-07_LAPTOP-52M1BM4J": "1z4k4H5zZNh5thrXWp-QKUjWI32TBEOWV",
-        "Dec01_11-36-51_LAPTOP-52M1BM4J": "1lIYyT3AJ_ah2AovWuO10M1xxKk06OPqF",
-        "Dec01_11-39-34_LAPTOP-52M1BM4J": "1mF_XI9KWQ0Qd7iRj2j44cHNtEhk6i3hc",
-        "Dec17_00-11-02_DESKTOP-P5BLEAQ": "1H5JKGuQQVLvI8IW2tPIyurm4aV7ddAJI",
-        "Nov30_01-44-53_LAPTOP-52M1BM4J": "1MxXLDIkxBdYVYMDKr0pwKMMosd4kb1BK"
-    }
-
-    # Proses Download Dataset
     for name, fid in dataset_files.items():
         path = os.path.join(data_dir, name)
         if not os.path.exists(path):
-            with st.spinner(f"Downloading {name}..."):
-                gdown.download(id=fid, output=path, quiet=True)
+            gdown.download(id=fid, output=path, quiet=True)
 
-    # Proses Download Folders Runs
-    for folder_name, fid in training_folders.items():
-        path = os.path.join(runs_base, folder_name)
+    # 2. Folder Runs (Hasil Training)
+    runs_dir = "runs"
+    os.makedirs(runs_dir, exist_ok=True)
+    training_runs = {
+        "Dec01_11-14": "1z4k4H5zZNh5thrXWp-QKUjWI32TBEOWV",
+        "Dec01_11-36": "1lIYyT3AJ_ah2AovWuO10M1xxKk06OPqF",
+        "Dec01_11-39": "1mF_XI9KWQ0Qd7iRj2j44cHNtEhk6i3hc",
+        "Dec17_00-11": "1H5JKGuQQVLvI8IW2tPIyurm4aV7ddAJI",
+        "Nov30_01-44": "1MxXLDIkxBdYVYMDKr0pwKMMosd4kb1BK"
+    }
+    for folder_name, fid in training_runs.items():
+        path = os.path.join(runs_dir, folder_name)
         if not os.path.exists(path):
-            with st.spinner(f"Downloading Training Results: {folder_name}..."):
-                url = f"https://drive.google.com/drive/folders/{fid}"
-                gdown.download_folder(url, output=path, quiet=True, use_cookies=False)
+            with st.spinner(f"Mengunduh Weights {folder_name}..."):
+                gdown.download_folder(url=f"https://drive.google.com/drive/folders/{fid}", 
+                                      output=path, quiet=True, use_cookies=False)
 
 # ==========================================
-# SIDEBAR & LOAD LOGIC
+# LOGIK MODEL & DATA
 # ==========================================
-st.sidebar.header("⚙️ Konfigurasi Model")
+st.sidebar.header("⚙️ Konfigurasi")
+model_type = st.sidebar.selectbox("Arsitektur Model:", ("GAT", "GIN", "GCN"))
 
-model_type = st.sidebar.selectbox(
-    "Pilih Arsitektur Model:",
-    ("GAT (Graph Attention Network)", "GIN (Graph Isomorphism Network)", "GCN (Graph Convolutional Network)")
-)
-
-if "GAT" in model_type:
-    config_file, model_name, ModelClass = "configs/elliptic_gat.yaml", "elliptic_gat", GAT
-elif "GIN" in model_type:
-    config_file, model_name, ModelClass = "configs/elliptic_gin.yaml", "elliptic_gin", GIN
-else:
-    config_file, model_name, ModelClass = "configs/elliptic_gcn.yaml", "elliptic_gcn", GCN
+# Mapping Config
+model_map = {
+    "GAT": ("configs/elliptic_gat.yaml", "elliptic_gat", GAT),
+    "GIN": ("configs/elliptic_gin.yaml", "elliptic_gin", GIN),
+    "GCN": ("configs/elliptic_gcn.yaml", "elliptic_gcn", GCN)
+}
+config_file, model_file_name, ModelClass = model_map[model_type]
 
 @st.cache_resource
-def load_all_assets(cfg_path):
-    try:
-        # Jalankan download sebelum load
-        download_from_drive()
-        
-        # Load Config
-        conf = OmegaConf.load(cfg_path)
-        
-        # Override paths agar sesuai dengan lokasi download
-        conf.dataset.features_path = "data/elliptic_bitcoin_dataset/elliptic_txs_features.csv"
-        conf.dataset.edges_path = "data/elliptic_bitcoin_dataset/elliptic_txs_edgelist.csv"
-        conf.dataset.classes_path = "data/elliptic_bitcoin_dataset/elliptic_txs_classes.csv"
-
-        ds = EllipticDataset(conf)
-        graph_data = ds.pyg_dataset()
-        id_map = {node_id: i for i, node_id in enumerate(ds.features_df.index.values)}
-        
-        return conf, graph_data, id_map, ds
-    except Exception as e:
-        st.error(f"Error loading assets: {e}")
-        return None, None, None, None
+def load_all_data(cfg_path):
+    download_assets()
+    conf = OmegaConf.load(cfg_path)
+    # Paksa path ke direktori download
+    conf.dataset.features_path = "data/elliptic_bitcoin_dataset/elliptic_txs_features.csv"
+    conf.dataset.edges_path = "data/elliptic_bitcoin_dataset/elliptic_txs_edgelist.csv"
+    conf.dataset.classes_path = "data/elliptic_bitcoin_dataset/elliptic_txs_classes.csv"
+    
+    ds = EllipticDataset(conf)
+    graph_data = ds.pyg_dataset()
+    id_map = {node_id: i for i, node_id in enumerate(ds.features_df.index.values)}
+    return conf, graph_data, id_map, ds
 
 @st.cache_resource
-def find_and_load_model(model_name, _ModelClass, _config, input_dim):
-    try:
-        import glob
-        # Cari file .pt di folder weights atau folder runs secara rekursif
-        pt_files = glob.glob(f"runs/**/{model_name}.pt", recursive=True) or \
-                   glob.glob(f"weights/{model_name}.pt") or \
-                   glob.glob(f"runs/**/*.pt", recursive=True)
+def load_model_weights(name, _Class, _conf, in_dim):
+    # Cari file .pt di folder runs
+    files = glob.glob(f"runs/**/{name}.pt", recursive=True) + glob.glob("runs/**/*.pt", recursive=True)
+    if not files: return None
+    
+    ckpt = torch.load(files[0], map_location="cpu")
+    _conf.model.input_dim = in_dim
+    model = _Class(_conf.model).double()
+    model.load_state_dict(ckpt)
+    model.eval()
+    return model
 
-        if not pt_files:
-            return None
+# --- Main Execution ---
+with st.spinner("Memuat sistem (Hanya lama saat pertama kali)..."):
+    config, graph, id_map, dataset = load_all_data(config_file)
 
-        path = pt_files[0]
-        checkpoint = torch.load(path, map_location="cpu")
-        _config.model.input_dim = input_dim
-        model = _ModelClass(_config.model).double()
-        model.load_state_dict(checkpoint)
-        model.eval()
-        return model
-    except Exception as e:
-        st.error(f"Error loading model weights: {e}")
-        return None
-
-# ==========================================
-# MAIN APP
-# ==========================================
-
-with st.spinner('Menyiapkan data dan model (ini mungkin memakan waktu beberapa menit pada jalankan pertama)...'):
-    config, graph, id_map, raw_dataset = load_all_assets(config_file)
-
-if graph is not None:
-    st.sidebar.success("✅ Dataset Ready!")
-    model = find_and_load_model(model_name, ModelClass, config, graph.num_node_features)
-
-    if model is None:
-        st.error(f"❌ File Model untuk {model_type} tidak ditemukan di folder 'runs'.")
+if graph:
+    model = load_model_weights(model_file_name, ModelClass, config, graph.num_node_features)
+    
+    if model:
+        st.success(f"✅ Model {model_type} Siap!")
+        tx_id = st.text_input("Transaction ID:", value="2304203")
+        if st.button("Analisa"):
+            if int(tx_id) in id_map:
+                idx = id_map[int(tx_id)]
+                with torch.no_grad():
+                    prob = torch.sigmoid(model(graph))[idx].item()
+                st.metric("Fraud Probability", f"{prob*100:.2f}%")
+                if prob > 0.5: st.error("🚨 TERDETEKSI FRAUD")
+                else: st.success("✅ TRANSAKSI LICIT")
+            else:
+                st.warning("ID tidak ditemukan.")
     else:
-        st.divider()
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.subheader("🔍 Analisis Transaksi")
-            example = raw_dataset.illicit_ids[0] if len(raw_dataset.illicit_ids) > 0 else "2304203"
-            tx_id_input = st.text_input("Transaction ID:", value=str(example))
-            
-            if st.button("Jalankan Prediksi GNN", type="primary"):
-                try:
-                    tx_id = int(tx_id_input)
-                    if tx_id in id_map:
-                        node_idx = id_map[tx_id]
-                        with torch.no_grad():
-                            logits = model(graph)
-                            prob = torch.sigmoid(logits)[node_idx].item()
-                        
-                        st.metric("Probability of Fraud", f"{prob*100:.2f}%")
-                        if prob > 0.5:
-                            st.error("🚨 TERDETEKSI ILLICIT")
-                        else:
-                            st.success("✅ TRANSAKSI AMAN")
-                    else:
-                        st.warning("ID tidak ditemukan dalam graf.")
-                except:
-                    st.error("Gagal memproses ID.")
-
-        with col2:
-            st.info("Sistem ini memproses data graf secara real-time untuk melihat relasi antar dompet.")
-            # Visualisasi bisa ditambahkan di sini sesuai kode sebelumnya
+        st.error("Weights tidak ditemukan di folder runs.")
